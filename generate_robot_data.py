@@ -65,6 +65,10 @@ class MujocoActor:
 
         self.pcd_max_points = pcd_max_points
         save_robot_metadata(self.model, self.model_xml_dir, self.save_dir)
+        # Record the canonical pose of the canonical samples so that LBS uses the same pose
+        # (lbs.get_canonical_pose differs from utils.mujoco_utils.get_canonical_pose for Franka).
+        np.save(os.path.join(self.save_dir, "robot_xml", "canonical_pose.npy"),
+                get_canonical_pose(self.model.jnt_range.copy(), robot_name=self.robot_name))
 
     def generate_and_save_pc(self, sample_id, args, is_canonical=False, is_test=False, verbose=False):
        
