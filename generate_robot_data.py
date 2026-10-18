@@ -221,11 +221,16 @@ def generate_data(num_actors, num_samples, model_xml_dir, save_dir, args, is_can
     while True:
      
         sample_type_prefix = "canonical_" if is_canonical else "test_" if is_test else ""
-        num_files = len(glob.glob(os.path.join(save_dir, f"{sample_type_prefix}sample_*")))
+        # Count finished samples only: the glob also matches "<sample>.lock" files, which made
+        # the loop exit at ~50% and the process quit while actors were still working.
+        num_files = len(glob.glob(os.path.join(save_dir, f"{sample_type_prefix}sample_*", "intrinsics.npy")))
         pbar.n = num_files
         pbar.refresh()
 
         if num_files >= num_samples:
+            break
+        # Also stop when every task has returned (e.g. an actor raised): ray.get below re-raises.
+        if len(ray.wait(tasks, num_returns=len(tasks), timeout=0)[0]) == len(tasks):
             break
 
         time.sleep(1)
@@ -235,6 +240,7 @@ def generate_data(num_actors, num_samples, model_xml_dir, save_dir, args, is_can
         pbar.set_description(f"Generating {sample_type} data for {robot_name} (Rate: {rate:.2f} files/sec)")
 
     pbar.close()
+    ray.get(tasks)  # surface actor exceptions and make sure every task has finished
     
     # Clean up lock files
     clean_lock_files(save_dir)
