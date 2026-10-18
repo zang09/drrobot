@@ -12,7 +12,7 @@ from utils.mujoco_utils import compute_camera_extrinsic_matrix, compute_camera_i
 from filelock import FileLock
 from utils.mujoco_utils import get_canonical_pose, set_xml_light_params, find_non_collision_pose, save_robot_metadata
 
-os.environ['MUJOCO_GL'] = 'osmesa'
+os.environ.setdefault('MUJOCO_GL', 'osmesa')  # allow MUJOCO_GL=egl (GPU) from the environment
 
 """
 This file creates many Mujoco environments simultaneously and renders images from them. 
