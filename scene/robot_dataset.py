@@ -125,6 +125,16 @@ class RobotDataset(Dataset):
             return self.__getitem__(idx + 1)
         
         FovX, FovY = 0.78, 0.78 #default fov from mujoco, TODO: implement it in a more principled way
+        # use the intrinsics the images were rendered with (MuJoCo fovy = 45 deg = 0.785 rad).
+        # The hardcoded 0.78 makes the learned robot slightly smaller than the real one, which shows up as
+        # a depth bias in camera calibration. DRROBOT_LEGACY_FOV=1 restores the upstream behavior.
+        if os.environ.get("DRROBOT_LEGACY_FOV", "0") != "1":
+            try:
+                K = np.load(os.path.join(data_dir, "intrinsics.npy"))[img_idx]
+                FovX = 2 * np.arctan(img.shape[2] / (2 * K[0, 0]))
+                FovY = 2 * np.arctan(img.shape[1] / (2 * K[1, 1]))
+            except Exception as e:
+                print(f"[RobotDataset] intrinsics.npy unavailable ({e}), using FoV 0.78")
 
             
         return Camera(
