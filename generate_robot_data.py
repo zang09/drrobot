@@ -81,10 +81,13 @@ class MujocoActor:
         #generate list of camera poses that are going to be used for this sample
         #since point clouds are also generated here, make sure to include sufficient camera angles
         camera_params = self.generate_camera_params() 
+        lookat = [0, 0, 0]
+        if getattr(args, "lookat_mode", "origin") != "origin" or getattr(args, "min_camera_clearance", 0.0) > 0:
+            camera_params, lookat = self.frame_cameras(joint_position, camera_params, args)
         images, depth_images, intrinsic_matrices, extrinsic_matrices = self.render_images(joint_position, 
                                                                                           camera_params,
                                                                                           render_depth=True,
-                                                                                          lookat=[0, 0, 0])
+                                                                                          lookat=lookat)
 
         pcds = []
         for i in range(len(images)):
@@ -147,6 +150,44 @@ class MujocoActor:
         np.save(os.path.join(unique_dir, 'extrinsics.npy'), extrinsic_matrices)
         np.save(os.path.join(unique_dir, 'intrinsics.npy'), intrinsic_matrices)
 
+    def frame_cameras(self, joint_position, camera_params, args):
+        """Opt-in camera framing (upstream issues #8/#9).
+
+        lookat_mode="mixed": each camera looks at a random point on the segment from the base
+        (world origin) to the end-effector body, so distal links are framed as often as the base.
+        min_camera_clearance > 0: re-sample a camera whose center is closer than this to any
+        geom bounding sphere (camera/robot intersection disrupts training, issue #8).
+        Returns (camera_params, per-camera lookat array [N, 3]).
+        """
+        mujoco.mj_resetData(self.model, self.data)
+        self.data.qpos[:] = joint_position
+        mujoco.mj_forward(self.model, self.data)
+        ee_body = getattr(args, "ee_body", None) or self.model.body(self.model.nbody - 1).name
+        ee_pos = self.data.body(ee_body).xpos.copy()
+        geom_pos = self.data.geom_xpos.copy()
+        geom_r = self.model.geom_rbound.copy()
+
+        def sample_lookat():
+            if args.lookat_mode == "mixed":
+                return np.random.uniform(0.0, 1.0) * ee_pos
+            return np.zeros(3)
+
+        def camera_center(dist, az, el, lookat):
+            az, el = np.deg2rad(az), np.deg2rad(el)
+            return lookat + dist * np.array([-np.cos(az) * np.cos(el), -np.sin(az) * np.cos(el), -np.sin(el)])
+
+        params = camera_params.copy()
+        lookats = np.zeros((len(params), 3))
+        for j in range(len(params)):
+            for _ in range(50):
+                lookat = sample_lookat()
+                clearance = np.min(np.linalg.norm(geom_pos - camera_center(*params[j], lookat), axis=1) - geom_r)
+                if clearance >= args.min_camera_clearance:
+                    break
+                params[j, 0] += 0.1 * args.camera_distance_factor  # back off and retry
+            lookats[j] = lookat
+        return params, lookats
+
     def render_images(self, joint_position, camera_params, render_depth=True, lookat=[0, 0, 0]):
         num_camera_params = camera_params.shape[0]
         images = []
@@ -160,7 +201,13 @@ class MujocoActor:
             cam.distance = camera_params[j, 0]
             cam.azimuth = camera_params[j, 1]
             cam.elevation = camera_params[j, 2]
-            cam.lookat = np.array(lookat)
+            if getattr(args, "exact_camera_angles", False):
+                # compute_camera_extrinsic_matrix() rounds angles to whole degrees; render at the
+                # same angles so images and extrinsics agree (otherwise up to 0.5 deg mismatch).
+                cam.azimuth = round(float(cam.azimuth) + 1e-3)
+                cam.elevation = round(float(cam.elevation) + 1e-3)
+            lookat_j = np.asarray(lookat, dtype=np.float64)
+            cam.lookat = lookat_j[j] if lookat_j.ndim == 2 else lookat_j
 
             self.data.qpos[:] = joint_position
 
@@ -268,6 +315,14 @@ if __name__ == "__main__":
     parser.add_argument('--camera_distance_factor', type=float, default=1.0, help='Factor to scale the camera distance, change this depending on robot size.')
     parser.add_argument('--debug', action='store_true', help='Debug mode.')
     parser.add_argument('--verbose', action='store_true', help='Verbose mode.')
+    # Opt-in camera framing (defaults reproduce upstream behavior)
+    parser.add_argument('--lookat_mode', choices=['origin', 'mixed'], default='origin',
+                        help="origin: upstream (look at world origin). mixed: random point on base->end-effector segment.")
+    parser.add_argument('--ee_body', type=str, default=None, help='End-effector body name (default: last body).')
+    parser.add_argument('--min_camera_clearance', type=float, default=0.0,
+                        help='Minimum distance [m] between camera center and any geom bounding sphere (0 = off).')
+    parser.add_argument('--exact_camera_angles', action='store_true',
+                        help='Render at the whole-degree angles used for the saved extrinsics.')
     args = parser.parse_args()
 
     model_xml_dir = args.model_xml_dir   
