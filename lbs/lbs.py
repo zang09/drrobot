@@ -251,7 +251,14 @@ def compute_and_cache_zero_pose_data(chain, v_template, lower_limits, upper_limi
         The offsets from the zero pose
     """
 
-    zero_pose = get_canonical_pose(lower_limits, upper_limits)
+    # the template (canonical samples) must be skinned from the pose it was captured in.
+    # generate_robot_data.py uses a different canonical pose for some robots (Franka: joint-limit
+    # mean), so prefer the pose saved with the model (robot_xml/canonical_pose.npy, see RobotScene).
+    zero_pose = getattr(chain, "canonical_pose", None)
+    if zero_pose is None:
+        zero_pose = get_canonical_pose(lower_limits, upper_limits)
+    else:
+        zero_pose = zero_pose.to(device=lower_limits.device, dtype=torch.float32)
     A_zero = batch_forward_kinematics(chain, zero_pose)
     with autocast('cuda', enabled=False):
         A_zero_inverse = torch.linalg.inv(A_zero)

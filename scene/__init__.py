@@ -20,6 +20,7 @@ from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 from scene.robot_dataset import RobotDataset
 
 import numpy as np
+import torch
 from scene.gaussian_model import BasicPointCloud
 from plyfile import PlyData, PlyElement
 from typing import NamedTuple
@@ -118,6 +119,13 @@ class RobotScene:
         self.num_joints = chain.n_joints
         self.gaussians.initialize_lrs_model(self.num_joints, num_frames)
         self.gaussians.initialize_kinematic_chain(chain)
+
+        # canonical pose actually used for the canonical samples (written by
+        # generate_robot_data.py). Absent for older datasets/models -> upstream behavior.
+        canonical_pose_path = os.path.join(args.model_path, "robot_xml/canonical_pose.npy")
+        if os.path.exists(canonical_pose_path):
+            self.gaussians.chain.canonical_pose = torch.tensor(np.load(canonical_pose_path), dtype=torch.float32)
+            print("[Scene] Using canonical pose from", canonical_pose_path)
 
         if self.loaded_iter:
             self.gaussians.load_ply(os.path.join(self.model_path,
