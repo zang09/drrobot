@@ -51,6 +51,9 @@ class MujocoActor:
         while not success and attempt < MAX_ATTEMPTS:
             try:
                 self.model = mujoco.MjModel.from_xml_path(self.model_xml_path)
+                # the offscreen buffer must hold the requested resolution (MuJoCo default 640 x 480)
+                self.model.vis.global_.offwidth = max(self.model.vis.global_.offwidth, resolution[1])
+                self.model.vis.global_.offheight = max(self.model.vis.global_.offheight, resolution[0])
                 self.data = mujoco.MjData(self.model)
                 self.save_dir = save_dir
                 self.renderer = mujoco.Renderer(self.model, resolution[0], resolution[1])
@@ -149,7 +152,11 @@ class MujocoActor:
             img.save(os.path.join(unique_dir, f"image_{i}.jpg"))
 
         for i, img in enumerate(depth_images):
-            np.save(os.path.join(unique_dir, f"depth_{i}.npy"), img)
+            if getattr(args, "no_depth", False):
+                # training reads depth only for the robot mask (depth < 10); store that mask instead (much smaller)
+                Image.fromarray(((img < 10.0) * 255).astype(np.uint8)).save(os.path.join(unique_dir, f"mask_{i}.png"))
+            else:
+                np.save(os.path.join(unique_dir, f"depth_{i}.npy"), img)
 
         np.save(os.path.join(unique_dir, 'extrinsics.npy'), extrinsic_matrices)
         np.save(os.path.join(unique_dir, 'intrinsics.npy'), intrinsic_matrices)
@@ -256,7 +263,8 @@ class MujocoActor:
 
 def generate_data(num_actors, num_samples, model_xml_dir, save_dir, args, is_canonical=False, is_test=False, verbose=False):
 
-    actors = [MujocoActor.remote(actor_id, model_xml_dir, save_dir) for actor_id in range(num_actors)]
+    res = int(getattr(args, "resolution", 256))
+    actors = [MujocoActor.remote(actor_id, model_xml_dir, save_dir, resolution=(res, res)) for actor_id in range(num_actors)]
 
     tasks = []
     for i in range(num_samples):
@@ -325,6 +333,9 @@ if __name__ == "__main__":
     parser.add_argument('--ee_body', type=str, default=None, help='End-effector body name (default: last body).')
     parser.add_argument('--min_camera_clearance', type=float, default=0.0,
                         help='Minimum distance [m] between camera center and any geom bounding sphere (0 = off).')
+    parser.add_argument('--resolution', type=int, default=256, help='Square image resolution of the dataset.')
+    parser.add_argument('--no_depth', action='store_true',
+                        help='Save the robot mask (mask_i.png) instead of the depth maps (depth_i.npy).')
     parser.add_argument('--exact_camera_angles', action='store_true',
                         help='Render at the whole-degree angles used for the saved extrinsics.')
     args = parser.parse_args()
