@@ -116,7 +116,11 @@ class RobotDataset(Dataset):
         try:
             img = np.array(Image.open(image_path)).astype(np.float32) / 255.0
             img = img.transpose(2, 0, 1)
-            depth = np.load(depth_path)
+            if os.path.exists(depth_path):
+                depth = np.load(depth_path)
+            else:   # dataset generated with --no_depth: depth-like values from the saved robot mask (robot < 10)
+                mask = np.array(Image.open(os.path.join(data_dir, "mask_{}.png".format(img_idx)))) > 127
+                depth = np.where(mask, 1.0, 100.0).astype(np.float32)
 
             extrinsic_matrix = extrinsics_matrices[img_idx]
             joint_params = self.normalize_joint_positions(raw_joint_params)
