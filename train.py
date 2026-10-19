@@ -59,7 +59,13 @@ def training(gaussians, scene, stage, tb_writer, dataset, opt, pipe, test_every,
     viewpoint_stack = scene.getTrainCameras(stage=stage)
     iteration = 0
 
-    for viewpoint_cam in itertools.cycle(viewpoint_stack):
+    def endless(dataset):
+        # itertools.cycle() keeps a copy of every element it has yielded, so the training views (images loaded by
+        # RobotDataset) accumulated in host memory until the process was killed (~48k iterations at 256 px, ~9k at 512 px)
+        while True:
+            yield from dataset
+
+    for viewpoint_cam in endless(viewpoint_stack):
 
         iteration += 1
         iter_start.record()
