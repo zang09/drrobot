@@ -87,6 +87,10 @@ def training(gaussians, scene, stage, tb_writer, dataset, opt, pipe, test_every,
 
         Ll1 = l1_loss(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+        if opt.lambda_mask > 0:
+            # supervise the silhouette directly: RGB on random backgrounds constrains alpha only indirectly,
+            # which leaves the learned silhouette slightly too large (a depth bias in camera calibration)
+            loss = loss + opt.lambda_mask * l1_loss(render_pkg["alpha"], viewpoint_cam.robot_mask.cuda().float()[None])
         loss.backward()
 
         iter_end.record()

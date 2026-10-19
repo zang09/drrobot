@@ -135,6 +135,7 @@ class OptimizationParams(ParamGroup):
         #### lrs + dr.robot params ####
         self.learn_rotations = False
         self.lambda_depth = 0.5
+        self.lambda_mask = 0.0          # weight of |alpha - robot mask| (mask = depth < 10 of the MuJoCo data); 0 = upstream
         self.canonical_training_iterations = 2_000
         self.pose_conditioned_training_iterations = 15_000
 
