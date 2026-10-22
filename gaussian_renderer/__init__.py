@@ -12,10 +12,21 @@
 import torch
 from torch.nn import functional as F
 import math
+import gsplat
 from gsplat import rasterization, rasterization_2dgs
 from scene.gaussian_model import GaussianModel
 from lbs.lbs import lrs, pose_conditioned_deform
 
+# gsplat >= 1.5 returns per-axis radii [C, N, 2] and pads the background of a depth channel itself
+GSPLAT_1_5 = tuple(int(v) for v in gsplat.__version__.split("+")[0].split(".")[:2]) >= (1, 5)
+
+
+def screen_radii(info):
+    """(radii [N], visible [N]) of the single camera from gsplat's meta, for densification."""
+    radii = info["radii"].squeeze(0)
+    if radii.dim() == 2: # gsplat >= 1.5: [N, 2] per axis
+        return radii.max(dim=-1).values, (radii > 0).all(dim=-1)
+    return radii, radii > 0
 
 
 def render(viewpoint_camera, 
@@ -123,7 +134,7 @@ def render(viewpoint_camera,
     rendered_image = render_colors[0].permute(2, 0, 1)
     # [1, H, W, 1] -> [1, H, W]; soft, differentiable accumulated opacity.
     rendered_alpha = render_alphas[0].permute(2, 0, 1)
-    radii = info["radii"].squeeze(0) # [N,]
+    radii, visible = screen_radii(info) # [N,]
     try:
         info["means2d"].retain_grad() # [1, N, 2]
     except:
@@ -135,23 +146,25 @@ def render(viewpoint_camera,
     return {"render": rendered_image,
             "alpha": rendered_alpha,
             "viewspace_points": info["means2d"],
-            "visibility_filter" : radii > 0,
+            "visibility_filter" : visible,
             "radii": radii}
 
 
 def render_surfels(means3D, rotations, scales, opacity, shs, sh_degree, viewmat, K, bg_color, viewpoint_camera):
     """2DGS counterpart of the rasterization in render(), with the extra outputs of the 2DGS regularizers."""
     H, W = int(viewpoint_camera.image_height), int(viewpoint_camera.image_width)
-    # "RGB+ED": the expected depth is rendered as a 4th channel (background depth 0), for the normal of the depth
+    # "RGB+ED": the expected depth is rendered as a 4th channel (background depth 0), for the normal of the depth;
+    # gsplat < 1.5 needs the background of that channel, >= 1.5 appends it itself
+    backgrounds = bg_color[None] if GSPLAT_1_5 else torch.cat([bg_color, bg_color.new_zeros(1)])[None]
     render_colors, render_alphas, render_normals, depth_normals, render_distort, _render_median, info = rasterization_2dgs(
         means=means3D,  # [N, 3]
         quats=rotations,  # [N, 4]
         scales=scales,  # [N, 3], third ignored
         opacities=opacity.squeeze(-1),  # [N,]
-        colors=shs,
+        colors=shs if sh_degree is not None else shs[None],  # gsplat >= 1.5 wants [C, N, D] for non-SH colors
         viewmats=viewmat[None],  # [1, 4, 4]
         Ks=K[None],  # [1, 3, 3]
-        backgrounds=torch.cat([bg_color, bg_color.new_zeros(1)])[None],
+        backgrounds=backgrounds,
         width=W,
         height=H,
         packed=False,
@@ -160,7 +173,7 @@ def render_surfels(means3D, rotations, scales, opacity, shs, sh_degree, viewmat,
         distloss=True,
     )
 
-    radii = info["radii"].squeeze(0) # [N,]
+    radii, visible = screen_radii(info) # [N,]
     # [1, H, W, C] -> [C, H, W]
     return {"render": render_colors[0, ..., :3].permute(2, 0, 1),
             "alpha": render_alphas[0].permute(2, 0, 1),
@@ -170,5 +183,5 @@ def render_surfels(means3D, rotations, scales, opacity, shs, sh_degree, viewmat,
             "distort": render_distort[0].permute(2, 0, 1),
             # 2DGS's projected means carry no gradient; gsplat accumulates the densification gradient in this dummy [1, N, 2]
             "viewspace_points": info["gradient_2dgs"],
-            "visibility_filter" : radii > 0,
+            "visibility_filter" : visible,
             "radii": radii}
