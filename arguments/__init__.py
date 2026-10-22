@@ -54,6 +54,7 @@ class ModelParams(ParamGroup):
         self._white_background = True
         self.data_device = "cuda"
         self.eval = False
+        self.surfel = False             # 2D Gaussian splats (surfels, gsplat rasterization_2dgs) instead of 3D Gaussians
 
         super().__init__(parser, "Loading Parameters", sentinel)
 
@@ -136,6 +137,12 @@ class OptimizationParams(ParamGroup):
         self.learn_rotations = False
         self.lambda_depth = 0.5
         self.lambda_mask = 0.0          # weight of |alpha - robot mask| (mask = depth < 10 of the MuJoCo data); 0 = upstream
+        # 2DGS regularizers (--surfel only). The start iterations count over both stages (canonical + pose conditioned),
+        # as 2DGS (normal from 7k, distortion from 3k of 30k iterations); weights of gsplat's simple_trainer_2dgs
+        self.lambda_dist = 0.01         # depth distortion (gsplat's L1 version)
+        self.lambda_normal = 0.05       # 1 - <rendered normal, normal of the rendered depth>
+        self.dist_from_iter = 3_000
+        self.normal_from_iter = 7_000
         self.canonical_training_iterations = 2_000
         self.pose_conditioned_training_iterations = 15_000
 

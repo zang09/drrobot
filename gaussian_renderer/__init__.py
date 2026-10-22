@@ -12,7 +12,7 @@
 import torch
 from torch.nn import functional as F
 import math
-from gsplat import rasterization
+from gsplat import rasterization, rasterization_2dgs
 from scene.gaussian_model import GaussianModel
 from lbs.lbs import lrs, pose_conditioned_deform
 
@@ -54,6 +54,9 @@ def render(viewpoint_camera,
 
     scales = pc.get_scaling * scaling_modifier
     rotations = pc.get_rotation
+    if pc.surfel:
+        # surfels store 2 scale axes; gsplat's 2DGS kernels take [N, 3] and ignore the third
+        scales = torch.cat([scales, torch.zeros_like(scales[:, :1])], dim=-1)
 
     if override_color is not None:
         shs = override_color # [N, 3]
@@ -66,6 +69,7 @@ def render(viewpoint_camera,
     joints = viewpoint_camera.joint_pose.to(means3D.device).repeat(means3D.shape[0],1)
     if stage == 'pose_conditioned':
         if pc.args.k_plane: # using k-plane deformation model for deformation instead of linear blend skinning
+            assert not pc.surfel, "k-plane deformation is not supported for surfels"
             means3D, scales, rotations, opacity, shs = pc._deformation(means3D, scales, rotations, opacity, shs, times_sel=None, joints=joints)
             rotations = pc.rotation_activation(rotations)
         else: # use lbs for means+rotations, + MLP for appearance
@@ -84,6 +88,8 @@ def render(viewpoint_camera,
             
             #these are learned during lrs
             scales = scales_out[0]
+            if pc.surfel: # the learned scale deformation must not re-inflate the surfel's normal axis
+                scales = torch.cat([scales[:, :2], torch.zeros_like(scales[:, 2:])], dim=-1)
             opacity = opacity_out[0]
             shs = shs_out[0]
 
@@ -94,6 +100,9 @@ def render(viewpoint_camera,
     # print("viewmat shape", viewmat.shape, "supposed to be 4x4")
     # print("grad before", viewpoint_camera.v.grad)
     # breakpoint()
+
+    if pc.surfel:
+        return render_surfels(means3D, rotations, scales, opacity, shs, sh_degree, viewmat, K, bg_color, viewpoint_camera)
 
     render_colors, render_alphas, info = rasterization(
         means=means3D,  # [N, 3]
@@ -126,5 +135,40 @@ def render(viewpoint_camera,
     return {"render": rendered_image,
             "alpha": rendered_alpha,
             "viewspace_points": info["means2d"],
+            "visibility_filter" : radii > 0,
+            "radii": radii}
+
+
+def render_surfels(means3D, rotations, scales, opacity, shs, sh_degree, viewmat, K, bg_color, viewpoint_camera):
+    """2DGS counterpart of the rasterization in render(), with the extra outputs of the 2DGS regularizers."""
+    H, W = int(viewpoint_camera.image_height), int(viewpoint_camera.image_width)
+    # "RGB+ED": the expected depth is rendered as a 4th channel (background depth 0), for the normal of the depth
+    render_colors, render_alphas, render_normals, depth_normals, render_distort, _render_median, info = rasterization_2dgs(
+        means=means3D,  # [N, 3]
+        quats=rotations,  # [N, 4]
+        scales=scales,  # [N, 3], third ignored
+        opacities=opacity.squeeze(-1),  # [N,]
+        colors=shs,
+        viewmats=viewmat[None],  # [1, 4, 4]
+        Ks=K[None],  # [1, 3, 3]
+        backgrounds=torch.cat([bg_color, bg_color.new_zeros(1)])[None],
+        width=W,
+        height=H,
+        packed=False,
+        sh_degree=sh_degree,
+        render_mode="RGB+ED",
+        distloss=True,
+    )
+
+    radii = info["radii"].squeeze(0) # [N,]
+    # [1, H, W, C] -> [C, H, W]
+    return {"render": render_colors[0, ..., :3].permute(2, 0, 1),
+            "alpha": render_alphas[0].permute(2, 0, 1),
+            "depth": render_colors[0, ..., 3:].permute(2, 0, 1),
+            "normal": render_normals[0].permute(2, 0, 1),  # world frame, facing the camera
+            "depth_normal": depth_normals.reshape(H, W, 3).permute(2, 0, 1),  # normal of the expected depth (world frame)
+            "distort": render_distort[0].permute(2, 0, 1),
+            # 2DGS's projected means carry no gradient; gsplat accumulates the densification gradient in this dummy [1, N, 2]
+            "viewspace_points": info["gradient_2dgs"],
             "visibility_filter" : radii > 0,
             "radii": radii}

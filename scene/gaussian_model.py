@@ -74,7 +74,7 @@ class GaussianModel:
 
         self.rotation_activation = torch.nn.functional.normalize
 
-    def __init__(self, sh_degree : int, args, device='cuda'):
+    def __init__(self, sh_degree : int, args, device='cuda', surfel=False):
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree  
         self._xyz = torch.empty(0)
@@ -94,6 +94,9 @@ class GaussianModel:
         self.args = args
         self.device = device
         self.chain = None
+        # 2D Gaussian splats (2DGS surfels): _scaling has 2 columns (the disk's axes; the normal is the rotation's z axis).
+        # Overwritten by load_ply()/restore() from the saved scales, so a loaded model renders in the mode it was trained in
+        self.surfel = surfel
 
     def capture(self):
         return (
@@ -128,6 +131,7 @@ class GaussianModel:
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
         self.optimizer.load_state_dict(opt_dict)
+        self.surfel = self._scaling.shape[1] == 2
 
     @property
     def get_scaling(self):
@@ -174,9 +178,14 @@ class GaussianModel:
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
-        scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
-        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
-        rots[:, 0] = 1
+        if self.surfel:
+            # as 2DGS: two scale axes, random orientations (the point cloud has no normals)
+            scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 2)
+            rots = torch.rand((fused_point_cloud.shape[0], 4), device="cuda")
+        else:
+            scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
+            rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+            rots[:, 0] = 1
 
         opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
@@ -297,6 +306,7 @@ class GaussianModel:
         self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True))
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
+        self.surfel = self._scaling.shape[1] == 2
 
         self.active_sh_degree = self.max_sh_degree
 
@@ -413,6 +423,9 @@ class GaussianModel:
                                               torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
 
         stds = self.get_scaling[selected_pts_mask].repeat(N,1)
+        if self.surfel:
+            # sample within the surfel's plane (no spread along its normal)
+            stds = torch.cat([stds, torch.zeros_like(stds[:, :1])], dim=-1)
         means =torch.zeros((stds.size(0), 3),device="cuda")
         samples = torch.normal(mean=means, std=stds)
         rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)

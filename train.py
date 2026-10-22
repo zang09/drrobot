@@ -97,6 +97,15 @@ def training(gaussians, scene, stage, tb_writer, dataset, opt, pipe, test_every,
             # supervise the silhouette directly: RGB on random backgrounds constrains alpha only indirectly,
             # which leaves the learned silhouette slightly too large (a depth bias in camera calibration)
             loss = loss + opt.lambda_mask * l1_loss(render_pkg["alpha"], viewpoint_cam.robot_mask.cuda().float()[None])
+        if gaussians.surfel:
+            # 2DGS regularizers, switched on after a warm-up counted over both stages
+            total_iteration = iteration + (opt.canonical_training_iterations if stage == 'pose_conditioned' else 0)
+            if opt.lambda_normal > 0 and total_iteration > opt.normal_from_iter:
+                # as gsplat's simple_trainer_2dgs: the normal of the depth is weighted by the (detached) alpha
+                depth_normal = render_pkg["depth_normal"] * render_pkg["alpha"].detach()
+                loss = loss + opt.lambda_normal * (1 - (render_pkg["normal"] * depth_normal).sum(dim=0)).mean()
+            if opt.lambda_dist > 0 and total_iteration > opt.dist_from_iter:
+                loss = loss + opt.lambda_dist * render_pkg["distort"].mean()
         loss.backward()
 
         iter_end.record()
@@ -226,7 +235,7 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
 def three_stage_training(dataset, hyper, opt, pipe, test_every, save_every, checkpoint_iterations, checkpoint, debug_from, experiment_name):
     
     tb_writer = prepare_output_and_logger(dataset, experiment_name)
-    gaussians = GaussianModel(dataset.sh_degree, opt)
+    gaussians = GaussianModel(dataset.sh_degree, opt, surfel=dataset.surfel)
     scene = RobotScene(dataset, gaussians, opt_params=opt)
 
     print("============ Training canonical Gaussian ============")
